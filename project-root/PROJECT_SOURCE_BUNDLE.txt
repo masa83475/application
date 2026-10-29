@@ -1,0 +1,1719 @@
+scanmeter-app 現状構成・ソースコード集
+
+このファイルは更新時点のプロジェクト構成とソースコードを一つにまとめたものです。
+目的: 検針票PDFをOCRし、CSVとして出力するローカルWebアプリ。
+
+【構成概要】
+- Python / FastAPI によるローカルWebアプリ。トップ画面、PDFアップロード、進捗取得、CSVダウンロード、クリーンアップを提供。
+- PDFページを画像化してTesseract日本語OCRを実行し、OCR結果をCSVとして出力。
+- 電力会社判定、4社（東京電力・中部電力・北陸電力・東北電力）の抽出処理、項目別CSV生成コードも収録。
+- runtime/ や temp/ の内容、キャッシュ、バイナリなどの生成物は収録していない。
+- 下記の構成図は収録対象のソース・設定ファイルを中心に示す。
+
+【構成図】
+├── app\
+│   ├── config\
+│   │   └── settings.py
+│   ├── routers\
+│   │   ├── __init__.py
+│   │   ├── cleanup_router.py
+│   │   ├── progress_router.py
+│   │   └── upload_router.py
+│   ├── services\
+│   │   ├── ocr\
+│   │   │   ├── company\
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── chuden.py
+│   │   │   │   ├── hokuriku.py
+│   │   │   │   ├── tepco.py
+│   │   │   │   └── tohoku.py
+│   │   │   ├── html_parser.py
+│   │   │   ├── image_ocr.py
+│   │   │   └── pdf_ocr.py
+│   │   ├── company_detector.py
+│   │   ├── csv_generator.py
+│   │   └── ocr_service.py
+│   ├── static\
+│   │   └── css\
+│   │       └── js\
+│   ├── templates\
+│   │   └── index.html
+│   └── main.py
+├── Dockerfile
+├── launcher.py
+├── README.txt
+├── requirements.txt
+└── 起動.bat
+
+【ソース・設定ファイル全文】
+
+================================================================================
+FILE: app\config\settings.py
+================================================================================
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+RUNTIME_DIR = BASE_DIR /  "runtime"
+
+TEMP_DIR = BASE_DIR / "temp"
+
+TESSERACT_PATH = (
+    RUNTIME_DIR /
+    "tesseract" /
+    "tesseract.exe"
+)
+
+POPPLER_PATH = (
+    RUNTIME_DIR /
+    "poppler" /
+    "Library" /
+    "bin"
+)
+
+================================================================================
+FILE: app\main.py
+================================================================================
+from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from app.routers.upload_router import router as upload_router
+from app.routers.cleanup_router import router as cleanup_router
+from app.routers.progress_router import router as progress_router
+
+app = FastAPI(
+    title="scanmeter-app"
+)
+
+# Static Files
+app.mount(
+    "/static",
+    StaticFiles(directory="app/static"),
+    name="static"
+)
+
+# Templates
+templates = Jinja2Templates(
+    directory="app/templates"
+)
+
+# Top Page
+@app.get("/")
+async def index(request: Request):
+
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html"
+    )
+
+# Health Check
+@app.get("/health")
+async def health():
+
+    return {
+        "status": "ok"
+    }
+
+# Routers
+app.include_router(upload_router)
+app.include_router(cleanup_router)
+app.include_router(progress_router)
+
+================================================================================
+FILE: app\routers\__init__.py
+================================================================================
+
+
+================================================================================
+FILE: app\routers\cleanup_router.py
+================================================================================
+import os
+import glob
+import json
+
+from fastapi import APIRouter
+
+router = APIRouter()
+
+from app.config.settings import TEMP_DIR
+
+PROGRESS_FILE = TEMP_DIR / "progress.json"
+
+
+@router.post("/cleanup")
+async def cleanup():
+
+    # CSV削除
+    for file in glob.glob(
+        os.path.join(
+            TEMP_DIR,
+            "*.csv"
+        )
+    ):
+
+        try:
+            os.remove(file)
+        except Exception:
+            pass
+
+    # PDF削除
+    for file in glob.glob(
+        os.path.join(
+            TEMP_DIR,
+            "*.pdf"
+        )
+    ):
+
+        try:
+            os.remove(file)
+        except Exception:
+            pass
+
+    # progress初期化
+    try:
+
+        with open(
+            PROGRESS_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                {
+                    "status": "idle",
+                    "current": 0,
+                    "total": 0,
+                    "percent": 0
+                },
+                f,
+                ensure_ascii=False
+            )
+
+    except Exception:
+        pass
+
+    return {
+        "status": "ok"
+    }
+
+================================================================================
+FILE: app\routers\progress_router.py
+================================================================================
+import json
+import os
+
+from fastapi import APIRouter
+
+router = APIRouter()
+
+from app.config.settings import TEMP_DIR
+
+PROGRESS_FILE = TEMP_DIR / "progress.json"
+
+
+@router.get("/progress")
+async def get_progress():
+
+    # progressファイルが無い場合
+    if not os.path.exists(PROGRESS_FILE):
+
+        return {
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "status": "idle"
+        }
+
+    try:
+
+        with open(
+            PROGRESS_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            progress = json.load(f)
+
+        return progress
+
+    except Exception:
+
+        return {
+            "current": 0,
+            "total": 0,
+            "percent": 0,
+            "status": "error"
+        }
+
+================================================================================
+FILE: app\routers\upload_router.py
+================================================================================
+import json
+import os
+import threading
+
+from uuid import uuid4
+
+from fastapi import APIRouter
+from fastapi import UploadFile
+from fastapi import File
+from fastapi import HTTPException
+
+from fastapi.responses import FileResponse
+
+from app.services.ocr_service import pdf_to_csv
+
+router = APIRouter()
+
+from app.config.settings import TEMP_DIR
+
+UPLOAD_DIR = TEMP_DIR
+PROGRESS_FILE = TEMP_DIR / "progress.json"
+
+os.makedirs(
+    UPLOAD_DIR,
+    exist_ok=True
+)
+
+CURRENT_CSV = None
+
+
+def run_ocr(
+    pdf_path,
+    csv_path
+):
+    global CURRENT_CSV
+
+    try:
+
+        result_csv = pdf_to_csv(
+            pdf_path,
+            csv_path
+        )
+
+        if os.path.exists(
+            pdf_path
+        ):
+            os.remove(
+                pdf_path
+            )
+
+        CURRENT_CSV = result_csv
+
+    except Exception as e:
+
+        with open(
+            PROGRESS_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                {
+                    "status": "error",
+                    "current": 0,
+                    "total": 0,
+                    "percent": 0,
+                    "message": str(e)
+                },
+                f,
+                ensure_ascii=False
+            )
+
+
+@router.post("/upload")
+async def upload_file(
+    file: UploadFile = File(...)
+):
+
+    global CURRENT_CSV
+
+    CURRENT_CSV = None
+
+    with open(
+        PROGRESS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            {
+                "status": "starting",
+                "current": 0,
+                "total": 0,
+                "percent": 0
+            },
+            f,
+            ensure_ascii=False
+        )
+
+    pdf_path = UPLOAD_DIR / f"{uuid4()}_{file.filename}"
+
+    with open(
+        pdf_path,
+        "wb"
+    ) as f:
+
+        f.write(
+            await file.read()
+        )
+
+    csv_path = pdf_path.with_suffix(".csv")
+
+    thread = threading.Thread(
+    target=run_ocr,
+    args=(
+        str(pdf_path),
+        str(csv_path)
+    ),
+    daemon=True
+)
+
+    thread.start()
+
+    return {
+        "status": "started"
+    }
+
+
+@router.get("/download")
+def download_csv():
+
+    global CURRENT_CSV
+
+    if not CURRENT_CSV:
+        raise HTTPException(
+            status_code=404,
+            detail="CSV未生成"
+        )
+
+    return FileResponse(
+        CURRENT_CSV,
+        filename="result.csv",
+        media_type="text/csv"
+    )
+
+================================================================================
+FILE: app\services\company_detector.py
+================================================================================
+def detect_company(text: str) -> str:
+    """
+    OCR/HTMLから抽出したテキストをもとに
+    電力会社を判定する
+    """
+
+    # 東北電力
+    if ("東北電力" in text) or ("ご使用量" in text and "東北" in text):
+        return "東北電力"
+
+    # 北陸電力
+    if ("北陸電力" in text) or ("ほくリンク" in text):
+        return "北陸電力"
+
+    # 東京電力
+    if ("東京電力" in text) or ("TEPCO" in text) or ("くらしTEPCO" in text):
+        return "東京電力"
+
+    # 中部電力
+    if ("中部電力" in text) or ("カテエネ" in text):
+        return "中部電力"
+
+    # 判定できない場合
+    return None
+
+================================================================================
+FILE: app\services\csv_generator.py
+================================================================================
+import csv
+import uuid
+import os
+
+def generate_csv(data: dict) -> str:
+    """
+    抽出結果 dict を CSV に変換し、一時ファイルとして保存する
+    FileResponse で返却できるようにファイルパスを返す
+    """
+
+    # 一時ファイルパス
+    temp_id = str(uuid.uuid4())
+    csv_path = f"/tmp/{temp_id}.csv"
+
+    # CSVの列順（固定）
+    headers = [
+        "電力会社名",
+        "契約種別",
+        "検針日",
+        "使用量(kWh)",
+        "請求金額",
+        "供給地点番号",
+        "前月使用量",
+        "燃料調整費",
+        "再エネ賦課金",
+        "基本料金",
+        "従量料金",
+        "電力量料金",
+        "契約容量",
+        "需要家番号",
+        "請求月",
+        "支払期限"
+    ]
+
+    # dict → CSV行に変換
+    row = [
+        data.get("company"),
+        data.get("contract"),
+        data.get("meter_date"),
+        data.get("usage"),
+        data.get("price"),
+        data.get("supply_point"),
+        data.get("prev_usage"),
+        data.get("fuel_cost"),
+        data.get("renewable_cost"),
+        data.get("basic_fee"),
+        data.get("meter_fee"),
+        data.get("power_fee"),
+        data.get("contract_amp"),
+        data.get("customer_id"),
+        data.get("billing_month"),
+        data.get("due_date"),
+    ]
+
+    # CSV書き込み
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerow(row)
+
+    return csv_path
+
+================================================================================
+FILE: app\services\ocr\company\__init__.py
+================================================================================
+
+
+================================================================================
+FILE: app\services\ocr\company\chuden.py
+================================================================================
+import re
+
+def extract(text: str) -> dict:
+    result = {}
+
+    result["company"] = "中部電力"
+
+    result["usage"] = _find(r"ご使用量[:：]?\s*([0-9]+)\s*kWh", text)
+    result["price"] = _find(r"ご請求金額[:：]?\s*([0-9,]+)円", text)
+    result["contract"] = _find(r"(従量電灯[BC]|低圧電力|高圧電力)", text)
+    result["meter_date"] = _find(r"検針日[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text)
+    result["supply_point"] = _find(r"供給地点番号[:：]?\s*([0-9]{22})", text)
+
+    result.update(_common_extract(text))
+
+    return result
+
+
+def _find(pattern: str, text: str):
+    m = re.search(pattern, text)
+    return m.group(1) if m else None
+
+
+def _common_extract(text: str) -> dict:
+    return {
+        "prev_usage": _find(r"前月使用量[:：]?\s*([0-9]+)\s*kWh", text),
+        "fuel_cost": _find(r"燃料調整費[:：]?\s*([0-9,]+)円", text),
+        "renewable_cost": _find(r"再エネ賦課金[:：]?\s*([0-9,]+)円", text),
+        "basic_fee": _find(r"基本料金[:：]?\s*([0-9,]+)円", text),
+        "meter_fee": _find(r"従量料金[:：]?\s*([0-9,]+)円", text),
+        "power_fee": _find(r"電力量料金[:：]?\s*([0-9,]+)円", text),
+        "contract_amp": _find(r"契約容量[:：]?\s*([0-9]+)A", text),
+        "customer_id": _find(r"需要家番号[:：]?\s*([0-9]+)", text),
+        "billing_month": _find(r"請求月[:：]?\s*([0-9]{4}/[0-9]{1,2})", text),
+        "due_date": _find(r"支払期限[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text),
+    }
+
+================================================================================
+FILE: app\services\ocr\company\hokuriku.py
+================================================================================
+import re
+
+def extract(text: str) -> dict:
+    result = {}
+
+    result["company"] = "北陸電力"
+
+    result["usage"] = _find(r"ご使用量[:：]?\s*([0-9]+)\s*kWh", text)
+    result["price"] = _find(r"ご請求金額[:：]?\s*([0-9,]+)円", text)
+    result["contract"] = _find(r"(従量電灯|業務用電力)", text)
+    result["meter_date"] = _find(r"検針日[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text)
+    result["supply_point"] = _find(r"供給地点番号[:：]?\s*([0-9]{22})", text)
+
+    result.update(_common_extract(text))
+
+    return result
+
+
+def _find(pattern: str, text: str):
+    m = re.search(pattern, text)
+    return m.group(1) if m else None
+
+
+def _common_extract(text: str) -> dict:
+    return {
+        "prev_usage": _find(r"前月使用量[:：]?\s*([0-9]+)\s*kWh", text),
+        "fuel_cost": _find(r"燃料調整費[:：]?\s*([0-9,]+)円", text),
+        "renewable_cost": _find(r"再エネ賦課金[:：]?\s*([0-9,]+)円", text),
+        "basic_fee": _find(r"基本料金[:：]?\s*([0-9,]+)円", text),
+        "meter_fee": _find(r"従量料金[:：]?\s*([0-9,]+)円", text),
+        "power_fee": _find(r"電力量料金[:：]?\s*([0-9,]+)円", text),
+        "contract_amp": _find(r"契約容量[:：]?\s*([0-9]+)A", text),
+        "customer_id": _find(r"需要家番号[:：]?\s*([0-9]+)", text),
+        "billing_month": _find(r"請求月[:：]?\s*([0-9]{4}/[0-9]{1,2})", text),
+        "due_date": _find(r"支払期限[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text),
+    }
+
+================================================================================
+FILE: app\services\ocr\company\tepco.py
+================================================================================
+import re
+
+def extract(text: str) -> dict:
+    result = {}
+
+    result["company"] = "東京電力"
+
+    result["usage"] = _find(r"使用量[:：]?\s*([0-9]+)\s*kWh", text)
+    result["price"] = _find(r"請求金額[:：]?\s*([0-9,]+)円", text)
+    result["contract"] = _find(r"(従量電灯[BC]|低圧電力|高圧電力)", text)
+    result["meter_date"] = _find(r"検針日[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text)
+    result["supply_point"] = _find(r"供給地点番号[:：]?\s*([0-9]{22})", text)
+
+    result.update(_common_extract(text))
+
+    return result
+
+
+def _find(pattern: str, text: str):
+    m = re.search(pattern, text)
+    return m.group(1) if m else None
+
+
+def _common_extract(text: str) -> dict:
+    return {
+        "prev_usage": _find(r"前月使用量[:：]?\s*([0-9]+)\s*kWh", text),
+        "fuel_cost": _find(r"燃料調整費[:：]?\s*([0-9,]+)円", text),
+        "renewable_cost": _find(r"再エネ賦課金[:：]?\s*([0-9,]+)円", text),
+        "basic_fee": _find(r"基本料金[:：]?\s*([0-9,]+)円", text),
+        "meter_fee": _find(r"従量料金[:：]?\s*([0-9,]+)円", text),
+        "power_fee": _find(r"電力量料金[:：]?\s*([0-9,]+)円", text),
+        "contract_amp": _find(r"契約容量[:：]?\s*([0-9]+)A", text),
+        "customer_id": _find(r"需要家番号[:：]?\s*([0-9]+)", text),
+        "billing_month": _find(r"請求月[:：]?\s*([0-9]{4}/[0-9]{1,2})", text),
+        "due_date": _find(r"支払期限[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text),
+    }
+
+================================================================================
+FILE: app\services\ocr\company\tohoku.py
+================================================================================
+import re
+
+def extract(text: str) -> dict:
+    result = {}
+
+    result["company"] = "東北電力"
+
+    result["usage"] = _find(r"ご使用量[:：]?\s*([0-9]+)\s*kWh", text)
+    result["price"] = _find(r"ご請求金額[:：]?\s*([0-9,]+)円", text)
+    result["contract"] = _find(r"(従量電灯[BC]|低圧電力|高圧電力)", text)
+    result["meter_date"] = _find(r"検針日[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text)
+    result["supply_point"] = _find(r"供給地点番号[:：]?\s*([0-9]{22})", text)
+
+    # 共通項目
+    result.update(_common_extract(text))
+
+    return result
+
+
+def _find(pattern: str, text: str):
+    m = re.search(pattern, text)
+    return m.group(1) if m else None
+
+
+def _common_extract(text: str) -> dict:
+    return {
+        "prev_usage": _find(r"前月使用量[:：]?\s*([0-9]+)\s*kWh", text),
+        "fuel_cost": _find(r"燃料調整費[:：]?\s*([0-9,]+)円", text),
+        "renewable_cost": _find(r"再エネ賦課金[:：]?\s*([0-9,]+)円", text),
+        "basic_fee": _find(r"基本料金[:：]?\s*([0-9,]+)円", text),
+        "meter_fee": _find(r"従量料金[:：]?\s*([0-9,]+)円", text),
+        "power_fee": _find(r"電力量料金[:：]?\s*([0-9,]+)円", text),
+        "contract_amp": _find(r"契約容量[:：]?\s*([0-9]+)A", text),
+        "customer_id": _find(r"需要家番号[:：]?\s*([0-9]+)", text),
+        "billing_month": _find(r"請求月[:：]?\s*([0-9]{4}/[0-9]{1,2})", text),
+        "due_date": _find(r"支払期限[:：]?\s*([0-9]{4}/[0-9]{1,2}/[0-9]{1,2})", text),
+    }
+
+================================================================================
+FILE: app\services\ocr\html_parser.py
+================================================================================
+from bs4 import BeautifulSoup
+
+def extract_text_from_html(html_path: str) -> str:
+    """
+    HTML（WEB版検針票）を DOM解析してテキスト抽出する
+    """
+    with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
+        html = f.read()
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # HTML内のテキストをすべて抽出
+    text = soup.get_text(separator="\n")
+
+    return text
+
+================================================================================
+FILE: app\services\ocr\image_ocr.py
+================================================================================
+import pytesseract
+from PIL import Image
+
+def extract_text_from_image(image_path: str) -> str:
+    """
+    PNG/JPG を OCR してテキスト抽出する
+    """
+    img = Image.open(image_path)
+    text = pytesseract.image_to_string(img, lang="jpn")
+    return text
+
+================================================================================
+FILE: app\services\ocr\pdf_ocr.py
+================================================================================
+import pytesseract
+from app.config.settings import POPPLER_PATH
+import tempfile
+import os
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """
+    紙PDF（画像ベース）を OCR してテキスト抽出する
+    """
+    text = ""
+
+    # PDF → 画像化（300dpi）
+    images = convert_from_path(
+        pdf_path,
+        poppler_path=str(POPPLER_PATH)
+)
+
+    for img in images:
+        # 一時ファイルに画像保存
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            img.save(tmp.name, "PNG")
+            tmp_path = tmp.name
+
+        # OCR実行（日本語）
+        page_text = pytesseract.image_to_string(tmp_path, lang="jpn")
+        text += page_text + "\n"
+
+        # 一時ファイル削除
+        os.remove(tmp_path)
+
+    return text
+
+================================================================================
+FILE: app\services\ocr_service.py
+================================================================================
+import os
+import csv
+import json
+
+from pdf2image import (
+    convert_from_path,
+    pdfinfo_from_path
+)
+
+import pytesseract
+from pytesseract import Output
+
+
+# =========================
+# Tesseract設定
+# =========================
+
+from app.config.settings import (
+    TESSERACT_PATH,
+    POPPLER_PATH,
+    TEMP_DIR
+)
+
+pytesseract.pytesseract.tesseract_cmd = str(
+    TESSERACT_PATH
+)
+
+PROGRESS_FILE = TEMP_DIR / "progress.json"
+
+
+def update_progress(
+    current,
+    total,
+    status="running"
+):
+
+    percent = 0
+
+    if total > 0:
+        percent = round(
+            current / total * 100,
+            1
+        )
+
+    with open(
+        PROGRESS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            {
+                "status": status,
+                "current": current,
+                "total": total,
+                "percent": percent
+            },
+            f,
+            ensure_ascii=False
+        )
+
+
+def extract_text_horizontal(image):
+
+    print("===== OCR START =====")
+    print(
+        "Tesseract Version:",
+        pytesseract.get_tesseract_version()
+    )
+
+    data = pytesseract.image_to_data(
+        image,
+        lang="jpn",
+        output_type=Output.DICT
+    )
+
+    rows = []
+
+    count = len(
+        data["text"]
+    )
+
+    for i in range(count):
+
+        text = data["text"][i].strip()
+
+        if not text:
+            continue
+
+        rows.append(
+            {
+                "text": text,
+                "top": data["top"][i],
+                "left": data["left"][i]
+            }
+        )
+
+    rows.sort(
+        key=lambda x: (
+            round(x["top"] / 15),
+            x["left"]
+        )
+    )
+
+    return rows
+
+
+def merge_rows(rows):
+
+    merged_lines = []
+
+    current_row = []
+    current_top = None
+
+    for row in rows:
+
+        top_group = round(
+            row["top"] / 15
+        )
+
+        if current_top is None:
+            current_top = top_group
+
+        if current_top != top_group:
+
+            merged_lines.append(
+                " ".join(current_row)
+            )
+
+            current_row = []
+            current_top = top_group
+
+        current_row.append(
+            row["text"]
+        )
+
+    if current_row:
+
+        merged_lines.append(
+            " ".join(current_row)
+        )
+
+    return merged_lines
+
+
+def pdf_to_csv(
+    pdf_path,
+    csv_path
+):
+
+    print("===== PDF INFO =====")
+
+    info = pdfinfo_from_path(
+    pdf_path,
+    poppler_path=str(POPPLER_PATH)
+)
+
+    total_pages = info["Pages"]
+
+    print(
+        f"Total Pages: {total_pages}"
+    )
+
+    update_progress(
+        0,
+        total_pages
+    )
+
+    result_lines = []
+
+    for page_no in range(
+        1,
+        total_pages + 1
+    ):
+
+        print(
+            f"Page {page_no}"
+        )
+
+        update_progress(
+            page_no,
+            total_pages
+        )
+
+        print("convert start")
+
+        images = convert_from_path(
+            pdf_path,
+            first_page=page_no,
+            last_page=page_no,
+            poppler_path=str(POPPLER_PATH)
+        )
+        print("convert done")
+
+        image = images[0]
+
+        rows = extract_text_horizontal(
+            image
+        )
+
+        print("ocr done")
+
+        lines = merge_rows(
+            rows
+        )
+
+        result_lines.extend(
+            lines
+        )
+
+    with open(
+        csv_path,
+        "w",
+        newline="",
+        encoding="utf-8-sig"
+    ) as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow(
+            ["OCR結果"]
+        )
+
+        for line in result_lines:
+
+            writer.writerow(
+                [line]
+            )
+
+    update_progress(
+        total_pages,
+        total_pages,
+        "completed"
+    )
+
+    return csv_path
+
+================================================================================
+FILE: app\templates\index.html
+================================================================================
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>scanmeter-app</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-100 min-h-screen">
+
+<div class="max-w-3xl mx-auto pt-10">
+
+    <h1 class="text-3xl font-bold mb-8">
+        scanmeter-app
+    </h1>
+
+    <div class="bg-white shadow rounded-xl p-6">
+
+        <form id="uploadForm">
+
+            <label class="block mb-3 font-semibold">
+                検針票PDFを選択
+            </label>
+
+            <input
+                type="file"
+                name="file"
+                accept=".pdf"
+                required
+                class="w-full border rounded p-3"
+            >
+
+            <button
+                type="submit"
+                class="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+            >
+                OCR開始
+            </button>
+
+        </form>
+
+        <div
+            id="loadingBox"
+            class="hidden mt-6 p-4 bg-blue-50 text-blue-700 rounded"
+        >
+            OCR処理中...
+        </div>
+
+        <div
+            id="progressContainer"
+            class="hidden mt-4"
+        >
+
+            <div
+                id="progressText"
+                class="text-sm text-gray-700"
+            >
+                0 / 0
+            </div>
+
+            <div
+                class="w-full bg-gray-200 rounded h-4 mt-2"
+            >
+                <div
+                    id="progressBar"
+                    class="bg-blue-600 h-4 rounded"
+                    style="width:0%"
+                ></div>
+            </div>
+
+            <div
+                id="percentText"
+                class="mt-2 text-sm"
+            >
+                0%
+            </div>
+
+        </div>
+
+        <div
+            id="errorBox"
+            class="hidden mt-6 p-4 bg-red-50 text-red-700 rounded"
+        ></div>
+
+    </div>
+
+</div>
+
+<div
+    id="completeModal"
+    class="hidden fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center"
+>
+
+    <div
+        class="bg-white rounded-xl shadow-lg p-6 w-96"
+    >
+
+        <h2
+            class="text-lg font-bold mb-4"
+        >
+            CSV出力完了
+        </h2>
+
+        <p class="mb-6">
+            CSVファイルの出力が完了しました。
+        </p>
+
+        <button
+            id="okButton"
+            class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded"
+        >
+            OK
+        </button>
+
+    </div>
+
+</div>
+
+<script>
+
+const uploadForm =
+    document.getElementById("uploadForm");
+
+const loadingBox =
+    document.getElementById("loadingBox");
+
+const errorBox =
+    document.getElementById("errorBox");
+
+const progressContainer =
+    document.getElementById("progressContainer");
+
+const progressText =
+    document.getElementById("progressText");
+
+const percentText =
+    document.getElementById("percentText");
+
+const progressBar =
+    document.getElementById("progressBar");
+
+const completeModal =
+    document.getElementById("completeModal");
+
+const okButton =
+    document.getElementById("okButton");
+
+let progressTimer = null;
+
+let fetchErrorCount = 0;
+
+let lastCurrent = 0;
+let lastTotal = 0;
+let lastPercent = 0;
+
+
+/* OCR開始 */
+
+uploadForm.addEventListener(
+    "submit",
+    async (e) => {
+
+        e.preventDefault();
+
+        errorBox.classList.add(
+            "hidden"
+        );
+
+        progressContainer.classList.remove(
+            "hidden"
+        );
+
+        loadingBox.classList.remove(
+            "hidden"
+        );
+
+        progressText.innerText =
+            "0 / 0";
+
+        percentText.innerText =
+            "0%";
+
+        progressBar.style.width =
+            "0%";
+
+        try {
+
+            const formData =
+                new FormData(uploadForm);
+
+            const response =
+                await fetch(
+                    "/upload",
+                    {
+                        method: "POST",
+                        body: formData
+                    }
+                );
+
+            if (!response.ok) {
+
+                throw new Error(
+                    "アップロード失敗"
+                );
+            }
+
+            startProgressMonitor();
+
+        }
+        catch(error) {
+
+            loadingBox.classList.add(
+                "hidden"
+            );
+
+            errorBox.innerText =
+                "アップロード失敗";
+
+            errorBox.classList.remove(
+                "hidden"
+            );
+        }
+    }
+);
+
+
+/* Progress監視 */
+
+function startProgressMonitor() {
+
+    if (progressTimer) {
+
+        clearInterval(
+            progressTimer
+        );
+    }
+
+    fetchErrorCount = 0;
+
+    progressTimer =
+        setInterval(
+            async () => {
+
+                try {
+
+                    const response =
+                        await fetch(
+                            "/progress"
+                        );
+
+                    const data =
+                        await response.json();
+
+                    fetchErrorCount = 0;
+
+                    errorBox.classList.add(
+                        "hidden"
+                    );
+
+                    lastCurrent =
+                        data.current ?? lastCurrent;
+
+                    lastTotal =
+                        data.total ?? lastTotal;
+
+                    lastPercent =
+                        data.percent ?? lastPercent;
+
+                    progressText.innerText =
+                        `${lastCurrent} / ${lastTotal}`;
+
+                    percentText.innerText =
+                        `${lastPercent}%`;
+
+                    progressBar.style.width =
+                        `${lastPercent}%`;
+
+                    if (
+                        data.status === "completed"
+                    ) {
+
+                        clearInterval(
+                            progressTimer
+                        );
+
+                        loadingBox.classList.add(
+                            "hidden"
+                        );
+
+                        // CSV自動ダウンロード
+
+                        const a =
+                            document.createElement(
+                                "a"
+                            );
+
+                        a.href =
+                            "/download";
+
+                        document.body.appendChild(
+                            a
+                        );
+
+                        a.click();
+
+                        a.remove();
+
+                        // 完了モーダル
+
+                        completeModal.classList.remove(
+                            "hidden"
+                        );
+
+                        return;
+                    }
+
+                    if (
+                        data.status ===
+                        "error"
+                    ) {
+
+                        clearInterval(
+                            progressTimer
+                        );
+
+                        loadingBox.classList.add(
+                            "hidden"
+                        );
+
+                        errorBox.innerText =
+                            data.message ||
+                            "OCRエラー";
+
+                        errorBox.classList.remove(
+                            "hidden"
+                        );
+
+                        return;
+                    }
+
+                }
+                catch(error) {
+
+                    fetchErrorCount++;
+
+                    console.warn(
+                        "progress fetch error",
+                        fetchErrorCount
+                    );
+
+                    // 最後の進捗を保持
+                    progressText.innerText =
+                        `${lastCurrent} / ${lastTotal}`;
+
+                    percentText.innerText =
+                        `${lastPercent}%`;
+
+                    progressBar.style.width =
+                        `${lastPercent}%`;
+
+                    if (
+                        fetchErrorCount >= 30
+                    ) {
+
+                        errorBox.innerText =
+                            "進捗取得に失敗しています";
+
+                        errorBox.classList.remove(
+                            "hidden"
+                        );
+                    }
+                }
+
+            },
+            1000
+        );
+}
+
+
+/* 完了 */
+
+okButton.addEventListener(
+    "click",
+    async () => {
+
+        completeModal.classList.add(
+            "hidden"
+        );
+
+        try {
+
+            await fetch(
+                "/cleanup",
+                {
+                    method: "POST"
+                }
+            );
+
+        } catch(error) {}
+
+        location.href =
+            "/";
+
+    }
+);
+
+</script>
+
+</body>
+</html>
+
+================================================================================
+FILE: Dockerfile
+================================================================================
+# ベースイメージ（軽量）
+FROM python:3.11-slim
+
+# 必要な OS パッケージをインストール
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-jpn \
+    ghostscript \
+    poppler-utils \
+    libgl1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 作業ディレクトリ
+WORKDIR /app
+
+# アプリファイルをコピー
+COPY app/ /app
+COPY requirements.txt /app/requirements.txt
+
+# Python ライブラリをインストール
+RUN pip install --no-cache-dir -r requirements.txt
+
+# FastAPI を起動するポート
+EXPOSE 8000
+
+# コンテナ起動時のコマンド
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+================================================================================
+FILE: launcher.py
+================================================================================
+import threading
+import webbrowser
+import uvicorn
+from pathlib import Path
+
+
+HOST = "127.0.0.1"
+PORT = 8000
+
+
+def open_browser():
+    webbrowser.open(
+        f"http://{HOST}:{PORT}"
+    )
+
+
+def ensure_runtime_folders():
+
+    base_dir = Path(__file__).resolve().parent
+
+    (base_dir / "temp").mkdir(
+        exist_ok=True
+    )
+
+    (base_dir / "logs").mkdir(
+        exist_ok=True
+    )
+
+
+if __name__ == "__main__":
+
+    ensure_runtime_folders()
+
+    threading.Timer(
+        2,
+        open_browser
+    ).start()
+
+    uvicorn.run(
+        "app.main:app",
+        host=HOST,
+        port=PORT,
+        reload=False,
+        log_level="info"
+    )
+
+================================================================================
+FILE: README.txt
+================================================================================
+scanmeter-app
+Version 1.0
+
+=========================================
+概要
+=========================================
+
+scanmeter-app は検針票PDFをOCR解析し、
+CSVファイルへ変換するアプリです。
+
+インターネット接続は不要です。
+
+処理はすべてPC内で実行されます。
+
+
+=========================================
+対応内容
+=========================================
+
+・PDFアップロード
+・OCR解析
+・進捗表示
+・CSV生成
+・CSVダウンロード
+・処理完了後自動クリーンアップ
+
+
+=========================================
+動作環境
+=========================================
+
+Windows 10
+Windows 11
+
+推奨メモリ
+
+8GB以上
+
+
+=========================================
+起動方法
+=========================================
+
+scanmeter-app.exe
+
+をダブルクリックしてください。
+
+数秒後にブラウザが起動します。
+
+起動しない場合は
+
+http://127.0.0.1:8000
+
+へアクセスしてください。
+
+
+=========================================
+利用手順
+=========================================
+
+① PDFを選択
+
+② OCR開始を押す
+
+③ 進捗を待つ
+
+④ CSV出力完了
+
+⑤ CSVを保存する
+
+
+=========================================
+処理中の注意
+=========================================
+
+OCR実行中は
+
+・アプリを終了しない
+・ブラウザを閉じない
+・PCをシャットダウンしない
+
+でください。
+
+ページ数が多いPDFは
+完了まで時間がかかります。
+
+
+=========================================
+フォルダ説明
+=========================================
+
+scanmeter-app.exe
+    アプリ本体
+
+runtime
+    OCR実行環境
+
+temp
+    一時ファイル保存先
+
+logs
+    ログ保存先
+
+
+=========================================
+エラー発生時
+=========================================
+
+以下を確認してください。
+
+・PDFが破損していないか
+・ディスク容量不足ではないか
+・ウイルス対策ソフトに
+  ブロックされていないか
+
+改善しない場合は
+
+logs
+
+フォルダ内のログを確認してください。
+
+
+=========================================
+一時ファイルについて
+=========================================
+
+処理中に生成された
+
+・PDF
+・CSV
+・進捗データ
+
+は処理完了後に自動削除されます。
+
+
+=========================================
+アンインストール
+=========================================
+
+scanmeter-app フォルダを
+削除するだけです。
+
+レジストリは使用しません。
+
+
+=========================================
+ライセンス
+=========================================
+
+社内利用向け
+
+無断転載・再配布禁止
+
+
+=========================================
+作成
+=========================================
+
+scanmeter-app
+Portable Edition
+
+================================================================================
+FILE: requirements.txt
+================================================================================
+fastapi==0.110.0
+starlette==0.36.3
+jinja2==3.0.3
+uvicorn==0.23.2
+
+python-multipart
+pdf2image
+pillow
+pytesseract
+beautifulsoup4
+lxml
+
+================================================================================
+FILE: 起動.bat
+================================================================================
+@echo off
+title scanmeter-app 起動
+
+echo -----------------------------------------
+echo  scanmeter-app 起動中...
+echo -----------------------------------------
+echo.
+
+echo Docker Desktop を確認しています...
+
+:: Docker が起動しているか確認
+docker info >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Docker Desktop が起動していません。起動します...
+    start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    echo 起動を待機しています...
+    timeout /t 10 >nul
+
+    docker info >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo Docker Desktop が起動できませんでした。
+        echo 手動で起動してから再度お試しください。
+        pause
+        exit /b
+    )
+)
+
+echo Docker Desktop が起動しています。
+echo.
+
+echo scanmeter-app イメージを確認しています...
+
+:: イメージ存在確認
+docker images | findstr "scanmeter-app" >nul
+if %errorlevel% neq 0 (
+    echo scanmeter-app イメージが見つかりません。
+    echo scanmeter-app.tar をロードしてください。
+    echo 例: docker load -i scanmeter-app.tar
+    pause
+    exit /b
+)
+
+echo → OK: scanmeter-app イメージが見つかりました。
+echo.
+
+echo 既存コンテナを確認しています...
+
+:: 既存コンテナ停止・削除
+docker ps -a | findstr "scanmeter-app" >nul
+if %errorlevel% eq 0 (
+    echo 既存コンテナを停止しています...
+    docker stop scanmeter-app >nul 2>&1
+
+    echo 既存コンテナを削除しています...
+    docker rm scanmeter-app >nul 2>&1
+) else (
+    echo → 既存コンテナなし
+)
+
+echo.
+echo コンテナを起動します...
+echo.
+
+:: ログを表示し続けるモードで起動（-d を使わない）
+docker run --name scanmeter-app -p 8000:8000 scanmeter-app:latest
+
+echo.
+echo -----------------------------------------
+echo  scanmeter-app が起動しました
+echo -----------------------------------------
+echo.
+
+echo ブラウザを開いています...
+start http://localhost:8000
+
+echo ログを表示しています。終了するには Ctrl + C を押してください。
+pause
