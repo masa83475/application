@@ -3,6 +3,8 @@ import webbrowser
 import uvicorn
 from pathlib import Path
 
+from app.main import app
+
 
 HOST = "127.0.0.1"
 PORT = 8000
@@ -15,7 +17,6 @@ def open_browser():
 
 
 def ensure_runtime_folders():
-
     base_dir = Path(__file__).resolve().parent
 
     (base_dir / "temp").mkdir(
@@ -37,7 +38,7 @@ if __name__ == "__main__":
     ).start()
 
     uvicorn.run(
-        "app.main:app",
+        app,
         host=HOST,
         port=PORT,
         reload=False,

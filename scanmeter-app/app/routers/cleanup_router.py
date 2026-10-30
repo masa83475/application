@@ -1,12 +1,11 @@
-import os
-import glob
 import json
+from pathlib import Path
 
 from fastapi import APIRouter
 
-router = APIRouter()
-
 from app.config.settings import TEMP_DIR
+
+router = APIRouter()
 
 PROGRESS_FILE = TEMP_DIR / "progress.json"
 
@@ -14,55 +13,54 @@ PROGRESS_FILE = TEMP_DIR / "progress.json"
 @router.post("/cleanup")
 async def cleanup():
 
-    # CSV削除
-    for file in glob.glob(
-        os.path.join(
-            TEMP_DIR,
-            "*.csv"
-        )
-    ):
+    deleted_files = []
 
+    # CSV削除
+    for file in TEMP_DIR.glob("*.csv"):
         try:
-            os.remove(file)
-        except Exception:
-            pass
+            file.unlink()
+            deleted_files.append(file.name)
+        except Exception as e:
+            print(f"CSV削除エラー: {file} -> {e}")
 
     # PDF削除
-    for file in glob.glob(
-        os.path.join(
-            TEMP_DIR,
-            "*.pdf"
-        )
-    ):
-
+    for file in TEMP_DIR.glob("*.pdf"):
         try:
-            os.remove(file)
-        except Exception:
-            pass
+            file.unlink()
+            deleted_files.append(file.name)
+        except Exception as e:
+            print(f"PDF削除エラー: {file} -> {e}")
 
     # progress初期化
     try:
+        progress = {
+            "status": "idle",
+            "current": 0,
+            "total": 0,
+            "percent": 0
+        }
 
         with open(
             PROGRESS_FILE,
             "w",
             encoding="utf-8"
         ) as f:
-
             json.dump(
-                {
-                    "status": "idle",
-                    "current": 0,
-                    "total": 0,
-                    "percent": 0
-                },
+                progress,
                 f,
                 ensure_ascii=False
             )
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"progress初期化エラー: {e}")
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
     return {
-        "status": "ok"
+        "status": "ok",
+        "deleted_count": len(deleted_files),
+        "deleted_files": deleted_files
     }

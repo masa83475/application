@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>scanmeter-app</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-100 min-h-screen">
+
+<div class="max-w-3xl mx-auto pt-10">
+
+    <h1 class="text-3xl font-bold mb-8">
+        scanmeter-app
+    </h1>
+
+    <div class="bg-white shadow rounded-xl p-6">
+
+        <form id="uploadForm">
+
+            <label class="block mb-3 font-semibold">
+                検針票PDFを選択
+            </label>
+
+            <input
+                type="file"
+                name="file"
+                accept=".pdf"
+                required
+                class="w-full border rounded p-3"
+            >
+
+            <button
+                type="submit"
+                class="mt-4 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+            >
+                OCR開始
+            </button>
+
+        </form>
+
+        <div
+            id="loadingBox"
+            class="hidden mt-6 p-4 bg-blue-50 text-blue-700 rounded"
+        >
+            OCR処理中...
+        </div>
+
+        <div
+            id="progressContainer"
+            class="hidden mt-4"
+        >
+
+            <div
+                id="progressText"
+                class="text-sm text-gray-700"
+            >
+                0 / 0
+            </div>
+
+            <div
+                class="w-full bg-gray-200 rounded h-4 mt-2"
+            >
+                <div
+                    id="progressBar"
+                    class="bg-blue-600 h-4 rounded"
+                    style="width:0%"
+                ></div>
+            </div>
+
+            <div
+                id="percentText"
+                class="mt-2 text-sm"
+            >
+                0%
+            </div>
+
+        </div>
+
+        <div
+            id="errorBox"
+            class="hidden mt-6 p-4 bg-red-50 text-red-700 rounded"
+        ></div>
+
+    </div>
+
+</div>
+
+<div
+    id="completeModal"
+    class="hidden fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center"
+>
+
+    <div
+        class="bg-white rounded-xl shadow-lg p-6 w-96"
+    >
+
+        <h2
+            class="text-lg font-bold mb-4"
+        >
+            CSV出力完了
+        </h2>
+
+        <p class="mb-6">
+            CSVファイルの出力が完了しました。
+        </p>
+
+        <button
+            id="okButton"
+            class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded"
+        >
+            OK
+        </button>
+
+    </div>
+
+</div>
+
+<script>
+
+const uploadForm =
+    document.getElementById("uploadForm");
+
+const loadingBox =
+    document.getElementById("loadingBox");
+
+const errorBox =
+    document.getElementById("errorBox");
+
+const progressContainer =
+    document.getElementById("progressContainer");
+
+const progressText =
+    document.getElementById("progressText");
+
+const percentText =
+    document.getElementById("percentText");
+
+const progressBar =
+    document.getElementById("progressBar");
+
+const completeModal =
+    document.getElementById("completeModal");
+
+const okButton =
+    document.getElementById("okButton");
+
+let progressTimer = null;
+
+let fetchErrorCount = 0;
+
+let lastCurrent = 0;
+let lastTotal = 0;
+let lastPercent = 0;
+
+
+/* OCR開始 */
+
+uploadForm.addEventListener(
+    "submit",
+    async (e) => {
+
+        e.preventDefault();
+
+        errorBox.classList.add(
+            "hidden"
+        );
+
+        progressContainer.classList.remove(
+            "hidden"
+        );
+
+        loadingBox.classList.remove(
+            "hidden"
+        );
+
+        progressText.innerText =
+            "0 / 0";
+
+        percentText.innerText =
+            "0%";
+
+        progressBar.style.width =
+            "0%";
+
+        try {
+
+            const formData =
+                new FormData(uploadForm);
+
+            const response =
+                await fetch(
+                    "/upload",
+                    {
+                        method: "POST",
+                        body: formData
+                    }
+                );
+
+            if (!response.ok) {
+
+                throw new Error(
+                    "アップロード失敗"
+                );
+            }
+
+            startProgressMonitor();
+
+        }
+        catch(error) {
+
+            loadingBox.classList.add(
+                "hidden"
+            );
+
+            errorBox.innerText =
+                "アップロード失敗";
+
+            errorBox.classList.remove(
+                "hidden"
+            );
+        }
+    }
+);
+
+
+/* Progress監視 */
+
+function startProgressMonitor() {
+
+    if (progressTimer) {
+
+        clearInterval(
+            progressTimer
+        );
+    }
+
+    fetchErrorCount = 0;
+
+    progressTimer =
+        setInterval(
+            async () => {
+
+                try {
+
+                    const response =
+                        await fetch(
+                            "/progress"
+                        );
+
+                    const data =
+                        await response.json();
+
+                    fetchErrorCount = 0;
+
+                    errorBox.classList.add(
+                        "hidden"
+                    );
+
+                    lastCurrent =
+                        data.current ?? lastCurrent;
+
+                    lastTotal =
+                        data.total ?? lastTotal;
+
+                    lastPercent =
+                        data.percent ?? lastPercent;
+
+                    progressText.innerText =
+                        `${lastCurrent} / ${lastTotal}`;
+
+                    percentText.innerText =
+                        `${lastPercent}%`;
+
+                    progressBar.style.width =
+                        `${lastPercent}%`;
+
+                    if (
+                        data.status === "completed"
+                    ) {
+
+                        clearInterval(
+                            progressTimer
+                        );
+
+                        loadingBox.classList.add(
+                            "hidden"
+                        );
+
+                        // CSV自動ダウンロード
+
+                        const a =
+                            document.createElement(
+                                "a"
+                            );
+
+                        a.href =
+                            "/download";
+
+                        document.body.appendChild(
+                            a
+                        );
+
+                        a.click();
+
+                        a.remove();
+
+                        // 完了モーダル
+
+                        completeModal.classList.remove(
+                            "hidden"
+                        );
+
+                        return;
+                    }
+
+                    if (
+                        data.status ===
+                        "error"
+                    ) {
+
+                        clearInterval(
+                            progressTimer
+                        );
+
+                        loadingBox.classList.add(
+                            "hidden"
+                        );
+
+                        errorBox.innerText =
+                            data.message ||
+                            "OCRエラー";
+
+                        errorBox.classList.remove(
+                            "hidden"
+                        );
+
+                        return;
+                    }
+
+                }
+                catch(error) {
+
+                    fetchErrorCount++;
+
+                    console.warn(
+                        "progress fetch error",
+                        fetchErrorCount
+                    );
+
+                    // 最後の進捗を保持
+                    progressText.innerText =
+                        `${lastCurrent} / ${lastTotal}`;
+
+                    percentText.innerText =
+                        `${lastPercent}%`;
+
+                    progressBar.style.width =
+                        `${lastPercent}%`;
+
+                    if (
+                        fetchErrorCount >= 30
+                    ) {
+
+                        errorBox.innerText =
+                            "進捗取得に失敗しています";
+
+                        errorBox.classList.remove(
+                            "hidden"
+                        );
+                    }
+                }
+
+            },
+            1000
+        );
+}
+
+
+/* 完了 */
+
+okButton.addEventListener(
+    "click",
+    async () => {
+
+        completeModal.classList.add(
+            "hidden"
+        );
+
+        try {
+
+            await fetch(
+                "/cleanup",
+                {
+                    method: "POST"
+                }
+            );
+
+        } catch(error) {}
+
+        location.href =
+            "/";
+
+    }
+);
+
+</script>
+
+</body>
+</html>
