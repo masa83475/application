@@ -16,6 +16,8 @@ from pytesseract import Output
 # =========================
 
 from app.config.settings import (
+    BASE_DIR,
+    RUNTIME_DIR,
     TESSERACT_PATH,
     POPPLER_PATH,
     TEMP_DIR
@@ -148,12 +150,34 @@ def pdf_to_csv(
     csv_path
 ):
 
+    print("===== SETTINGS =====")
+    print("BASE_DIR =", BASE_DIR)
+    print("RUNTIME_DIR =", RUNTIME_DIR)
+
+    print("TESSERACT_PATH =", TESSERACT_PATH)
+    print("POPPLER_PATH =", POPPLER_PATH)
+
+    print(
+        "pdfinfo.exe =",
+        (POPPLER_PATH / "pdfinfo.exe").exists()
+    )
+
+    print(
+        "pdftoppm.exe =",
+        (POPPLER_PATH / "pdftoppm.exe").exists()
+    )
+
+    print(
+        "tesseract.exe =",
+        TESSERACT_PATH.exists()
+    )
+
     print("===== PDF INFO =====")
 
     info = pdfinfo_from_path(
-    pdf_path,
-    poppler_path=str(POPPLER_PATH)
-)
+        pdf_path,
+        poppler_path=str(POPPLER_PATH)
+    )
 
     total_pages = info["Pages"]
 

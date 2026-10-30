@@ -1,7 +1,7 @@
 scanmeter-app 構成・コード・仕様
 ================================
 
-確認日: 2026-10-29
+確認日: 2026-10-30
 
 この資料は、application フォルダ内にある scanmeter-app と project-root の
 ファイルを確認してまとめたものです。
@@ -33,6 +33,12 @@ README には Windows 10 / Windows 11、推奨メモリ 8 GB 以上と記載さ�
 scanmeter-app\
 |-- launcher.py                 Python から起動するランチャー
 |-- README.txt                  利用者向け説明
+|-- scanmeter-app.spec          PyInstaller のビルド設定
+|-- dist\
+|   |-- scanmeter-app\
+|       |-- scanmeter-app.exe   PyInstaller で生成された実行ファイル
+|       |-- _internal\          Python ランタイムと依存ライブラリ
+|-- build\                      PyInstaller のビルド中間生成物
 |-- app\
 |   |-- main.py                 FastAPI アプリ、画面とルーターの登録
 |   |-- config\
@@ -56,6 +62,9 @@ app/static 内は空のディレクトリのみで、画面の JavaScript は in
 
 元ソースと思われる project-root には、上記に加えて Dockerfile、
 requirements.txt、起動.bat、および以下の追加コードがあります。
+なお、launcher.py、app/main.py、app/config/settings.py、
+app/routers/cleanup_router.py は project-root 側の内容が配布フォルダより古く、
+この資料では配布フォルダ側の現行コードを掲載しています。
 
 - app/services/company_detector.py
 - app/services/csv_generator.py
@@ -78,14 +87,16 @@ requirements.txt、起動.bat、および以下の追加コードがあります
 
 launcher.py
   temp と logs のフォルダを作成し、Uvicorn でアプリを起動します。
-  起動から約2秒後に http://127.0.0.1:8000 をブラウザーで開きます。
+  FastAPI アプリを直接 Uvicorn に渡し、起動から約2秒後に
+  http://127.0.0.1:8000 をブラウザーで開きます。
 
 app/main.py
   FastAPI アプリを作成し、トップ画面とヘルスチェックを提供します。
   アップロード、進捗、クリーンアップの各ルーターを登録します。
 
 app/config/settings.py
-  アプリの基準フォルダを起点に runtime、temp、Tesseract 実行ファイル、
+  PyInstaller 実行時は EXE のあるフォルダ、通常の Python 実行時は
+  アプリのソースフォルダを基準に runtime、temp、Tesseract 実行ファイル、
   Poppler の実行ファイルフォルダのパスを組み立てます。
 
 app/routers/upload_router.py
@@ -145,10 +156,16 @@ CSV は UTF-8 BOM 付きです。列は「OCR結果」の1列で、認識した�
 6. 配布・動作上の確認事項
 -------------------------
 
-- README.txt は scanmeter-app.exe の起動を案内していますが、確認した
-  scanmeter-app フォルダ内に scanmeter-app.exe はありません。存在する
-  launcher.py は Python と必要な Python パッケージがある環境で実行する
-  スクリプトです。
+- PyInstaller で生成された scanmeter-app.exe は
+  scanmeter-app\dist\scanmeter-app\scanmeter-app.exe にあります。
+  scanmeter-app.spec は one-folder 形式の出力を設定しています。
+- 確認した dist\scanmeter-app には EXE と _internal はありますが、
+  runtime フォルダ（Tesseract と Poppler）が含まれていません。
+  現行 settings.py は PyInstaller 実行時に EXE の隣の runtime を参照するため、
+  この dist フォルダ単体では OCR 用ランタイムが不足します。配布時には
+  runtime を dist\scanmeter-app\runtime として同梱する必要があります。
+- launcher.py を Python スクリプトとして起動する場合は、Python と
+  project-root\requirements.txt に記載された依存パッケージが必要です。
 - scanmeter-app には requirements.txt がありません。元ソース側
   project-root\requirements.txt には FastAPI、Uvicorn、pdf2image、
   Pillow、pytesseract 等が記載されています。
@@ -177,14 +194,13 @@ CSV は UTF-8 BOM 付きです。列は「OCR結果」の1列で、認識した�
   ください。
 - エラー時は logs の内容を確認してください。ただし、本資料作成時に
   ログ出力先へのアプリログ記録処理はコード上で確認できていません。
-- 配布時には、READMEの起動方法、必要な Python 実行環境、Python依存関係、
-  外部CSSへの接続要件が実際のパッケージ内容と一致していることを確認して
-  ください。
+- 配布時には、READMEの起動方法、EXEとruntimeの配置、外部CSSへの接続要件が
+  実際のパッケージ内容と一致していることを確認してください。
 
 8. コード全文
 =============
 
-以下は確認時点の実ファイルを、そのままファイル単位で収録したものです。
+以下は2026-10-30の確認時点の実ファイルを、そのままファイル単位で収録したものです。
 「scanmeter-app」配布フォルダにあるコードを先に示し、その後に project-root
 だけに存在する追加コードと起動・依存設定を示します。追加コードは現在の
 配布フォルダには含まれていません。runtime 内の EXE、DLL、学習データ等の
@@ -199,6 +215,8 @@ import webbrowser
 import uvicorn
 from pathlib import Path
 
+from app.main import app
+
 
 HOST = "127.0.0.1"
 PORT = 8000
@@ -211,7 +229,6 @@ def open_browser():
 
 
 def ensure_runtime_folders():
-
     base_dir = Path(__file__).resolve().parent
 
     (base_dir / "temp").mkdir(
@@ -233,7 +250,7 @@ if __name__ == "__main__":
     ).start()
 
     uvicorn.run(
-        "app.main:app",
+        app,
         host=HOST,
         port=PORT,
         reload=False,
@@ -244,6 +261,9 @@ if __name__ == "__main__":
 FILE: scanmeter-app\app\main.py
 ==============================================================================
 
+import sys
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -252,40 +272,79 @@ from app.routers.upload_router import router as upload_router
 from app.routers.cleanup_router import router as cleanup_router
 from app.routers.progress_router import router as progress_router
 
+
+# --------------------------------------------------
+# パス設定
+# --------------------------------------------------
+
+if getattr(sys, "frozen", False):
+    # PyInstaller実行時
+    BASE_DIR = Path(sys._MEIPASS)
+else:
+    # 通常実行時
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+STATIC_DIR = BASE_DIR / "app" / "static"
+TEMPLATE_DIR = BASE_DIR / "app" / "templates"
+
+
+# --------------------------------------------------
+# FastAPI
+# --------------------------------------------------
+
 app = FastAPI(
     title="scanmeter-app"
 )
 
+
+# --------------------------------------------------
 # Static Files
-app.mount(
-    "/static",
-    StaticFiles(directory="app/static"),
-    name="static"
-)
+# --------------------------------------------------
 
+if STATIC_DIR.exists():
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(STATIC_DIR)),
+        name="static"
+    )
+
+
+# --------------------------------------------------
 # Templates
+# --------------------------------------------------
+
 templates = Jinja2Templates(
-    directory="app/templates"
+    directory=str(TEMPLATE_DIR)
 )
 
+
+# --------------------------------------------------
 # Top Page
+# --------------------------------------------------
+
 @app.get("/")
 async def index(request: Request):
-
     return templates.TemplateResponse(
         request=request,
         name="index.html"
     )
 
+
+# --------------------------------------------------
 # Health Check
+# --------------------------------------------------
+
 @app.get("/health")
 async def health():
-
     return {
         "status": "ok"
     }
 
+
+# --------------------------------------------------
 # Routers
+# --------------------------------------------------
+
 app.include_router(upload_router)
 app.include_router(cleanup_router)
 app.include_router(progress_router)
@@ -294,25 +353,50 @@ app.include_router(progress_router)
 FILE: scanmeter-app\app\config\settings.py
 ==============================================================================
 
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-RUNTIME_DIR = BASE_DIR /  "runtime"
+# --------------------------------------------------
+# ベースディレクトリ
+# --------------------------------------------------
 
+if getattr(sys, "frozen", False):
+    # PyInstaller EXE実行時
+    BASE_DIR = Path(sys.executable).parent
+else:
+    # 通常のPython実行時
+    BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+# --------------------------------------------------
+# アプリフォルダ
+# --------------------------------------------------
+
+RUNTIME_DIR = BASE_DIR / "runtime"
 TEMP_DIR = BASE_DIR / "temp"
 
+
+# --------------------------------------------------
+# Tesseract
+# --------------------------------------------------
+
 TESSERACT_PATH = (
-    RUNTIME_DIR /
-    "tesseract" /
-    "tesseract.exe"
+    RUNTIME_DIR
+    / "tesseract"
+    / "tesseract.exe"
 )
 
+
+# --------------------------------------------------
+# Poppler
+# --------------------------------------------------
+
 POPPLER_PATH = (
-    RUNTIME_DIR /
-    "poppler" /
-    "Library" /
-    "bin"
+    RUNTIME_DIR
+    / "poppler"
+    / "Library"
+    / "bin"
 )
 
 ==============================================================================
@@ -325,15 +409,14 @@ FILE: scanmeter-app\app\routers\__init__.py
 FILE: scanmeter-app\app\routers\cleanup_router.py
 ==============================================================================
 
-import os
-import glob
 import json
+from pathlib import Path
 
 from fastapi import APIRouter
 
-router = APIRouter()
-
 from app.config.settings import TEMP_DIR
+
+router = APIRouter()
 
 PROGRESS_FILE = TEMP_DIR / "progress.json"
 
@@ -341,57 +424,56 @@ PROGRESS_FILE = TEMP_DIR / "progress.json"
 @router.post("/cleanup")
 async def cleanup():
 
-    # CSV削除
-    for file in glob.glob(
-        os.path.join(
-            TEMP_DIR,
-            "*.csv"
-        )
-    ):
+    deleted_files = []
 
+    # CSV削除
+    for file in TEMP_DIR.glob("*.csv"):
         try:
-            os.remove(file)
-        except Exception:
-            pass
+            file.unlink()
+            deleted_files.append(file.name)
+        except Exception as e:
+            print(f"CSV削除エラー: {file} -> {e}")
 
     # PDF削除
-    for file in glob.glob(
-        os.path.join(
-            TEMP_DIR,
-            "*.pdf"
-        )
-    ):
-
+    for file in TEMP_DIR.glob("*.pdf"):
         try:
-            os.remove(file)
-        except Exception:
-            pass
+            file.unlink()
+            deleted_files.append(file.name)
+        except Exception as e:
+            print(f"PDF削除エラー: {file} -> {e}")
 
     # progress初期化
     try:
+        progress = {
+            "status": "idle",
+            "current": 0,
+            "total": 0,
+            "percent": 0
+        }
 
         with open(
             PROGRESS_FILE,
             "w",
             encoding="utf-8"
         ) as f:
-
             json.dump(
-                {
-                    "status": "idle",
-                    "current": 0,
-                    "total": 0,
-                    "percent": 0
-                },
+                progress,
                 f,
                 ensure_ascii=False
             )
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"progress初期化エラー: {e}")
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
     return {
-        "status": "ok"
+        "status": "ok",
+        "deleted_count": len(deleted_files),
+        "deleted_files": deleted_files
     }
 
 ==============================================================================
@@ -1719,3 +1801,62 @@ start http://localhost:8000
 echo ログを表示しています。終了するには Ctrl + C を押してください。
 pause
 
+==============================================================================
+FILE: scanmeter-app\scanmeter-app.spec
+==============================================================================
+
+# -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('app/templates', 'app/templates'), ('app/static', 'app/static')]
+binaries = []
+hiddenimports = []
+tmp_ret = collect_all('uvicorn')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('fastapi')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('starlette')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+
+a = Analysis(
+    ['launcher.py'],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='scanmeter-app',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='scanmeter-app',
+)
